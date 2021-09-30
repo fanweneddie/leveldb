@@ -12,9 +12,9 @@ The architecture of `leveldb` is shown in Figure 1.
 
 Here I will introduce each data structures as below.
 
-## Components
+## Basic Components
 
-### Encoding
+### Coding
 
 * For fixed int(32 bits or 63 bits), it simply uses a buffer to store the int. Here, it uses `little-endian` way.
 
@@ -69,7 +69,7 @@ struct ParsedInternalKey {
 size | User key (string) | sequence number (7 bytes) | value type (1 byte) |
 ```
 
-Where size is a `varInt` and it equals to size of key + 8.
+Where size is a `varInt` and it equals to (size of key) + 8.
 
 
 
@@ -161,6 +161,43 @@ If we have found that key, we will check the type of that key. If it is `kTypeVa
 
 
 
+### SkipList
+
+Skip list is defined in `db/skipList.h`.
+
+`SkipList` has these interfaces:
+
+* `Insert()`: insert a key into `SkipList`
+* `Contains()`: check whether `SkipList` contains the key
+* `Iterator()`: return an iterator for the `SkipList`
+
+#### Search
+
+It calls method `FindGreaterOrEqual()` to search, which is a classical way for skipList(shown as Figure 2).
+
+<img src="pictures/skipList.png" alt="skipList" style="zoom: 80%;" />
+
+ <div align = "center">Figure 2: SkipList search</div> 
+
+#### Insert
+
+When we are trying to insert a key, we first search this key by calling `FindGreaterOrEqual()`.
+
+After getting the location to insert, we call `RandomHeight()` to get the height of that node.
+
+Then, we can easily insert that node that represents the key.
+
+BTW, we can encapsulate the `skipList` into a `Iterator`.
+
+#### Node
+
+The node of `SkipList` is defined as `Node`, and it has certain fields:
+
+* `key`: The key in the node
+* `next_[]`: next_[i] points to next node on the `i`th level.  
+
+`Node` uses `std::memory_order_xxx` for thread safety.
+
 ## Log
 
 For safety, we should first append the write operation to `log` before we update `Memtable`.
@@ -194,16 +231,16 @@ In leveldb document, the format of a `SSTable` is shown below
 
 ```
 <beginning_of_file>
-[data block 1]
-[data block 2]
-...
-[data block N]
-[meta block 1]
-...
-[meta block K]
-[metaindex block]
-[index block]
-[Footer]        (fixed size; starts at file_size - sizeof(Footer))
+[data block 1]       <----|
+[data block 2]       <----|
+...                       |
+[data block N]       <----|
+[meta block 1]  <--|      |
+...                |      |
+[meta block K]  <--|      |
+[metaindex block] -|      |                                      <--|
+[index block]-------------|                                      <--|
+[Footer]        (fixed size; starts at file_size - sizeof(Footer)) -|
 <end_of_file>
 ```
 
@@ -211,7 +248,7 @@ There are several blocks:
 
 * `data block`: It stores the sorted sequence of key-value pairs.
 
-* `meta block`: It stores bloom filters for a data block.
+* `meta block`: Aka `filter block`, and it stores bloom filters for a data block.
 
 * `metaindex block`: It contains an entry for each `meta block` in this `SSTable`. For the entry, key is the name of `meta block` and value is a `blockHandle` pointing to that `meta block`.
 
@@ -223,10 +260,10 @@ There are several blocks:
 
   ```
   metaindex_handle: char[p];     // Block handle for metaindex
-   index_handle:     char[q];     // Block handle for index
-   padding:          char[40-p-q];// zeroed bytes to make fixed length
+  index_handle:     char[q];     // Block handle for index
+  padding:          char[40-p-q];// zeroed bytes to make fixed length
                                   // (40==2*BlockHandle::kMaxEncodedLength)
-   magic:            fixed64;     // == 0xdb4775248b80fb57 (little-endian)
+  magic:            fixed64;     // == 0xdb4775248b80fb57 (little-endian)
   ```
 
 ### Block
@@ -241,7 +278,7 @@ block data  | type(1 byte) | crc32(4 bytes)
 
 where type is the type of compression(such as snappy).
 
-For block data, the read operation is done by class`Block` and its construction is done by class `BlockBuilder`.
+For block data, the read operation is done by class `Block` and its construction is done by class `BlockBuilder`.
 
 
 
@@ -257,7 +294,7 @@ For a key-value pair, it stores in block data with a format of
 * `key_delta`: the string of unshared suffix
 * `value`: the value in a key-value pair
 
-As for `restart point`,its `shared_bytes` = 0
+As for `restart point`, its `shared_bytes` = 0
 
 
 
@@ -268,11 +305,11 @@ At the end of a block, it has
 
 
 
-Therefore, the block structure is like Figure 1.
+Therefore, the block structure is like Figure 3.
 
 ![block](pictures/block.png)
 
- <div align = "center">Figure 1: Block structure</div> 
+ <div align = "center">Figure 3: Block structure</div> 
 
 #### Construction: BlockBuilder
 
@@ -337,13 +374,13 @@ Inner class `Block::Iter` has fields:
 
 * `Next()`: It runs `ParseNextKey()` to go to the next entry and get its key-value pair.
 * `Prev()`: Firstly, it goes to the nearest restart point before the entry. Then, it keeps calling `ParseNextKey()` until it reaches the right entry.
-* Seek(): Firstly, it uses binary search to find the last restart point whose key < target. Then, it keeps calling `ParseNextKey()` until it reaches the first key such that key >= target. 
+* `Seek()`: Firstly, it uses binary search to find the last restart point whose key < target. Then, it keeps calling `ParseNextKey()` until it reaches the first key such that key >= target. 
 
 
 
 ### Construction: TableBuilder
 
-Here I introduce how to build a `SSTable`. It is done by class `TableBuilder` and defined in `table_builder.h/.cc`.
+Here I introduce how to build a `SSTable`. It is done by class `TableBuilder` and defined in `include/leveldb/table_builder.h`.
 
 `TableBuilder` has these interface:
 
@@ -374,5 +411,121 @@ std::string compressed_output;//压缩后的data block，临时存储，写入�
 
 
 
-The method `Add()` of  `TableBuilder`  works as follows:
+Method `Add()` of  `TableBuilder` works as follow:
+
+1. Make sure that current file is not closed and finished. Also make sure that the added key is the largest in current file.
+2. If we have entered an empty data block, we will record the index of last index block.
+3. We also add the key into the filter block
+4. We set `last_key` = `key`, and then add the key into data_block
+5. If the number of data block exceeds the limit, we will flush it into the file
+
+
+
+Method `Flush()` of `TableBuilder` works as follow:
+
+1. Make sure that the data block has been written
+2. Call `WriteBlock()` to write the data block into disk
+
+Method `WriteBlock()` gets the serialized slice of the block, and may compress the slice. Then it calls `WriteRawBlock()` to write the block.
+
+In method `WriteRawBlock()`, it first set the index handle info of data block. Then, it writes the block contents into the file
+
+
+
+Method `Finish()` of `TableBuilder` denotes that the current `SSTable` has been persistent and closed. It works as follow:
+
+1. Call `Flush()` to write the last data block into disk
+2. Call `WriteRawBlock()` to write filter block into disk
+3. Write the index of filter block into meta index block, and write meta index block into disk
+4. write the index of data block into index block, and write index block into disk
+5. write the handle of meta index block and index block, then write footer into disk
+
+### Read: Table
+
+`SSTable`'s Read operation is defined in class `Table`.(Defined in `include/leveldb/table.h`) 
+
+
+
+Method `Open()` in `Table`:
+
+1. Read `Footer` and parse it
+2. Read index block by `Footer`
+3. construct `Rep` in `Table` object
+
+Method `BlockReader()` in `Table`:
+
+
+
+### Iterate Table
+
+Class `Table` can get an `Iterator` by calling method `NewIterator()`, which returns a `TwoLevelIterator`.
+
+`TwoLevelIterator` can iterate and parse different kinds of blocks(Same format but different meanings).
+
+
+
+Method `Seek()` in `TwoLevelIterator`:
+
+1. Given the target, seek index
+2. Given `index_iter`, seek data block
+
+
+
+### Bloom Filter
+
+Defined in class `FilterPolicy` in `include/leveldb/filter_policy.h`.
+
+To be done
+
+
+
+## Table Cache
+
+`TableCache` maintains a LRU cache to cache all `Table` object.
+
+It has several interfaces:
+
+* `Evict()`: Given a file, it clears all its entry in cache.
+* `Get()`: It seeks an entry of a given internal key.
+
+
+
+Method `Get()` works as below:
+
+1. Calls `FindTable()`to get the cache of the table
+2. In cache, calls `Table::InternalGet()` to get the entry.
+
+```cpp
+Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
+                       uint64_t file_size, const Slice& k, void* arg,
+                       void (*handle_result)(void*, const Slice&,
+                                             const Slice&)) {
+  Cache::Handle* handle = nullptr;
+  Status s = FindTable(file_number, file_size, &handle);
+  if (s.ok()) {
+    Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+    s = t->InternalGet(options, k, arg, handle_result);
+    cache_->Release(handle);
+  }
+  return s;
+}
+```
+
+
+
+For method `FindTable()`:
+
+It firstly search table in cache. If it has found it, return success; Otherwise, It opens that table from disk file and insert that table into cache.
+
+To be done...
+
+
+
+## DB Open
+
+
+
+## DB Get
+
+
 
